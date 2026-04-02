@@ -1,0 +1,340 @@
+import * as THREE from "three";
+import { SimplexNoise } from "three/addons/math/SimplexNoise.js";
+
+const container = document.querySelector(".hero-three-js");
+
+if (!container) {
+  console.error("Container element .hero-three-js not found.");
+} else {
+  init();
+}
+
+function init() {
+  const scene = new THREE.Scene();
+
+  const camera = new THREE.PerspectiveCamera(
+    30,
+    container.clientWidth / container.clientHeight
+  );
+  camera.position.set(0, 3.1, 5);
+  camera.rotation.x = -Math.PI / 7.5;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  container.appendChild(renderer.domElement);
+
+  const uniforms = {
+    uColor: { value: new THREE.Color(0x22edeb) },
+    uBaseSize: { value: 0.04 },
+    uMaxGlowSize: { value: 0.1 },
+    uViewHeight: { value: container.clientHeight },
+    uMorph: { value: 0.0 },
+    uMorphEdge: { value: 0.15 },
+  };
+
+  const resizeObserver = new ResizeObserver((entries) => {
+    for (let entry of entries) {
+      const { width, height } = entry.contentRect;
+
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+
+      renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+
+      uniforms.uViewHeight.value = height;
+    }
+  });
+  resizeObserver.observe(container);
+
+  const mouse = new THREE.Vector2();
+  container.addEventListener("mousemove", (event) => {
+    const rect = container.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  });
+
+  let targetMorph = 0.0;
+  let isRotationActive = false;
+
+  function updateScrollTargets() {
+    const rect = container.getBoundingClientRect();
+    const scrollY = window.scrollY || window.pageYOffset;
+    const viewportH = window.innerHeight || document.documentElement.clientHeight;
+
+    const heroSection = container.closest('.panel-animated-bg-with-text');
+    const sectionTop = heroSection.offsetTop;
+    const sectionHeight = heroSection.offsetHeight;
+    
+    const scrollProgress = (scrollY - sectionTop) / (sectionHeight - viewportH);
+    const clampedProgress = Math.max(0, Math.min(1, scrollProgress));
+
+    targetMorph = clampedProgress;
+
+    const containerStart = rect.top;
+    const containerEnd = rect.bottom;
+    const visibleTop = Math.max(containerStart, 0);
+    const visibleBottom = Math.min(containerEnd, viewportH);
+    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+    const visiblePercentage = (visibleHeight / rect.height) * 100;
+
+    isRotationActive = visiblePercentage > 10;
+  }
+
+
+  window.addEventListener("scroll", updateScrollTargets);
+  window.addEventListener("resize", updateScrollTargets);
+  updateScrollTargets();
+
+  const ripples = [];
+  const raycaster = new THREE.Raycaster();
+  const surface = new THREE.Group();
+  scene.add(surface);
+
+  const geometry = new THREE.PlaneGeometry(10, 8, 150, 100);
+  const pos = geometry.getAttribute("position");
+
+  const heights = new Float32Array(pos.count);
+  geometry.setAttribute("aHeight", new THREE.BufferAttribute(heights, 1));
+
+  const spherePositions = new Float32Array(pos.count * 3);
+  const corePositions = new Float32Array(pos.count * 3);
+  const sphereUsage = new Float32Array(pos.count);
+
+  const sphereRadius = 0.5;
+  const coreRadius = 0.2;
+  const usageRatio = 0.6;
+
+  for (let i = 0; i < pos.count; i++) {
+    const isSphere = Math.random() < usageRatio ? 1.0 : 0.0;
+    sphereUsage[i] = isSphere;
+
+    const u = Math.random();
+    const v = Math.random();
+    const theta = 2.0 * Math.PI * u;
+    const phi = Math.acos(2.0 * v - 1.0);
+
+    const dirX = Math.sin(phi) * Math.cos(theta);
+    const dirY = Math.sin(phi) * Math.sin(theta);
+    const dirZ = Math.cos(phi);
+
+    spherePositions[i * 3 + 0] = dirX * sphereRadius;
+    spherePositions[i * 3 + 1] = dirY * sphereRadius;
+    spherePositions[i * 3 + 2] = dirZ * sphereRadius;
+
+    corePositions[i * 3 + 0] = dirX * coreRadius;
+    corePositions[i * 3 + 1] = dirY * coreRadius;
+    corePositions[i * 3 + 2] = dirZ * coreRadius;
+  }
+
+  geometry.setAttribute("aSpherePosition", new THREE.BufferAttribute(spherePositions, 3));
+  geometry.setAttribute("aCorePosition", new THREE.BufferAttribute(corePositions, 3));
+  geometry.setAttribute("aSphereUsage", new THREE.BufferAttribute(sphereUsage, 1));
+
+  const simplex = new SimplexNoise();
+
+  const hitPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(10, 8),
+    new THREE.MeshBasicMaterial({ visible: false })
+  );
+  surface.add(hitPlane);
+
+  const vertexShader = `
+    attribute float aHeight;
+    attribute vec3 aSpherePosition;
+    attribute vec3 aCorePosition;
+    attribute float aSphereUsage;
+
+    uniform float uBaseSize;
+    uniform float uMaxGlowSize;
+    uniform float uViewHeight;
+    uniform float uMorph;
+    uniform float uMorphEdge;
+
+    varying float vHeight;
+    varying vec3 vPosition;
+    varying float vSphereUsage;
+    varying float vMorph;
+
+    void main() {
+      vHeight = aHeight;
+      vSphereUsage = aSphereUsage;
+      vMorph = uMorph;
+
+      vec3 planePos = position;
+      vec3 toCore = mix(planePos, aCorePosition, uMorph);
+      float outerT = uMorph * aSphereUsage;
+      vec3 finalPos = mix(toCore, aSpherePosition, outerT);
+
+      vPosition = finalPos;
+
+      vec4 mvPosition = modelViewMatrix * vec4(finalPos, 1.0);
+      float sizeFactor = smoothstep(0.0, 0.25, vHeight);
+      float dynamicSize = mix(uBaseSize, uMaxGlowSize, sizeFactor);
+      float scale = uViewHeight * 0.5;
+      gl_PointSize = dynamicSize * (scale / -mvPosition.z);
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    uniform vec3 uColor;
+    uniform float uViewHeight;
+    uniform float uMorph;
+    uniform float uMorphEdge;
+
+    varying float vHeight;
+    varying vec3 vPosition;
+    varying float vSphereUsage;
+    varying float vMorph;
+
+    void main() {
+      float dist = distance(gl_PointCoord, vec2(0.5));
+      float circleAlpha = pow(1.0 - smoothstep(0.0, 0.5, dist), 2.0);
+
+      vec3 finalColor = uColor;
+      float glowFactor = smoothstep(0.0, 0.25, vHeight);
+      finalColor += glowFactor * 0.5;
+
+      float bottomFade = smoothstep(0.0, 0.15 * uViewHeight, gl_FragCoord.y);
+      float alpha = circleAlpha * bottomFade;
+
+      float sheetPhase = 1.0 - smoothstep(0.3, 0.5, uMorph);
+      if (sheetPhase > 0.0) {
+        float fadeX = 1.0 - smoothstep(0.8, 1.0, abs(vPosition.x) / 5.0);
+        float fadeY = 1.0 - smoothstep(0.8, 1.0, abs(vPosition.y) / 4.0);
+        float edgeFadePlane = fadeX * fadeY;
+        alpha *= mix(1.0, edgeFadePlane, sheetPhase);
+      }
+
+      float morphPhase = smoothstep(0.5, 1.0, uMorph);
+
+      float coreFade = 1.0;
+      if (uMorph > 0.93) {
+        float t = (uMorph - 0.93) / 0.07;
+        coreFade = 1.0 - smoothstep(0.0, 1.0, t);
+      }
+
+      float isCore = 1.0 - vSphereUsage;
+      float usageFade = vSphereUsage + isCore * coreFade;
+
+      if (morphPhase > 0.0) {
+        float r = length(vPosition);
+        float sphereEdgeFade = 1.0 - smoothstep(0.48, 0.52, r);
+        usageFade *= mix(1.0, sphereEdgeFade, morphPhase);
+      }
+
+      alpha *= usageFade;
+
+      if (alpha <= 0.001) discard;
+
+      gl_FragColor = vec4(finalColor, alpha);
+    }
+  `;
+
+  const particleMaterial = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader,
+    fragmentShader,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+
+  const waves = new THREE.Points(geometry, particleMaterial);
+  surface.add(waves);
+  surface.rotation.x = -Math.PI / 2;
+
+  container.addEventListener("click", () => {
+    if (uniforms.uMorph.value > 0.2) return;
+
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObject(hitPlane, false);
+    if (intersects.length > 0) {
+      const localPoint = waves.worldToLocal(intersects[0].point.clone());
+      ripples.push({
+        x: localPoint.x,
+        y: localPoint.y,
+        startTime: performance.now(),
+        maxAge: 4000,
+      });
+    }
+  });
+
+  function animationLoop(t) {
+    const clickFrequency = 4.0;
+    const clickAmplitude = 0.7;
+    const clickSpeed = 2.0;
+    const clickDamping = 0.6;
+    const clickMaxAge = 4000;
+    const fadeInDuration = 1000;
+    const fadeOutDuration = 2200;
+
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const age = t - ripples[i].startTime;
+      if (age > clickMaxAge) {
+        ripples.splice(i, 1);
+      }
+    }
+
+    uniforms.uMorph.value += (targetMorph - uniforms.uMorph.value) * 0.08;
+
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+
+      const noiseZ = 0.2 * simplex.noise3d(x / 2.5, y / 2.5, t / 4000);
+
+      let ripplesZ = 0.0;
+      if (ripples.length > 0) {
+        for (const ripple of ripples) {
+          const rippleAge = t - ripple.startTime;
+
+          let envelope;
+          if (rippleAge < fadeInDuration) {
+            envelope = rippleAge / fadeInDuration;
+          } else if (rippleAge > clickMaxAge - fadeOutDuration) {
+            envelope = 1.0 - (rippleAge - (clickMaxAge - fadeOutDuration)) / fadeOutDuration;
+          } else {
+            envelope = 1.0;
+          }
+
+          envelope = Math.max(0.0, envelope);
+          const distance = Math.sqrt(
+            Math.pow(x - ripple.x, 2) + Math.pow(y - ripple.y, 2)
+          );
+          ripplesZ +=
+            envelope *
+            clickAmplitude *
+            Math.exp(-distance * clickDamping) *
+            Math.sin(distance * clickFrequency - (rippleAge / 1000) * clickSpeed);
+        }
+      }
+
+      const finalZ = noiseZ + ripplesZ;
+      pos.setZ(i, finalZ);
+      heights[i] = finalZ;
+    }
+
+    pos.needsUpdate = true;
+    geometry.attributes.aHeight.needsUpdate = true;
+
+    if (isRotationActive) {
+      if (uniforms.uMorph.value < 0.95) {
+        surface.rotation.y += (mouse.x * 0.05 - surface.rotation.y) * 0.05;
+        surface.rotation.x += ((-Math.PI / 2) + mouse.y * 0.05 - surface.rotation.x) * 0.05;
+      } else {
+        surface.rotation.x = THREE.MathUtils.lerp(surface.rotation.x, -Math.PI / 2, 0.08);
+        surface.rotation.y += 0.001;
+      }
+    }
+
+    const morphProgress = Math.min(uniforms.uMorph.value, 0.5) / 0.5;
+    surface.position.y = THREE.MathUtils.lerp(surface.position.y, morphProgress * 1.01, 0.1);
+
+    renderer.render(scene, camera);
+  }
+
+  renderer.setAnimationLoop(animationLoop);
+}
